@@ -68,6 +68,7 @@ public final class PackConfirmScreen extends VersionedScreen {
 		this.later = null;
 		this.actions = payload.actions();
 		this.firstInstall = true;
+		this.keepExistingMods = payload.keepExistingMods();
 		this.unverified = !payload.unverifiedJarPaths().isEmpty();
 		this.parent = null;
 		this.laterPreview = null;

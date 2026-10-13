@@ -6,6 +6,8 @@ import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
@@ -14,6 +16,7 @@ import java.math.BigInteger;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
+import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -220,6 +223,55 @@ class DownloadClientTest {
 		assertNotNull(manager.getDeferredFailure(null));
 	}
 
+	@Test
+	void configuredCaFrontRequiresValidChainAndEndpointHostnameAndNeverOverridesAnExistingPin() throws Exception {
+		assertConfiguredCaFront(true, true, "127.0.0.1", null, true);
+		assertConfiguredCaFront(false, true, "127.0.0.1", null, false);
+		assertConfiguredCaFront(true, false, "127.0.0.1", null, false);
+		assertConfiguredCaFront(true, true, "wrong.example", null, false);
+		assertConfiguredCaFront(true, true, "127.0.0.1", NetUtils.getFingerprint(NetUtils.selfSign(NetUtils.generateKeyPair())), false);
+	}
+
+	private static void assertConfiguredCaFront(boolean configured, boolean trustedCa, String endpointHost, String expectedPin, boolean accepted) throws Exception {
+		KeyPair caKeys = NetUtils.generateKeyPair();
+		X500Principal caName = new X500Principal("CN=Configured Front CA");
+		X509Certificate ca = mint(caName, caKeys.getPublic(), caName, caKeys.getPrivate(), true, List.of());
+		KeyPair leafKeys = NetUtils.generateKeyPair();
+		X509Certificate leaf = mint(new X500Principal("CN=127.0.0.1"), leafKeys.getPublic(), caName, caKeys.getPrivate(), false,
+				List.<Object[]>of(new Object[]{GeneralName.iPAddress, "127.0.0.1"}));
+		KeyStore store = KeyStore.getInstance(KeyStore.getDefaultType());
+		store.load(null, null);
+		if (trustedCa) store.setCertificateEntry("front-ca", ca);
+		else store.setCertificateEntry("unrelated", NetUtils.selfSign(NetUtils.generateKeyPair()));
+		var trust = new CustomizableTrustManager.SessionTrust("127.0.0.2:25565", expectedPin);
+		var manager = new CustomizableTrustManager(trust, null, store);
+		AtomicInteger prompts = new AtomicInteger();
+		try (TransferServer server = new TransferServer(leafKeys, leaf); Socket plain = new Socket("127.0.0.1", server.port())) {
+			DataOutputStream output = new DataOutputStream(plain.getOutputStream());
+			byte[] host = endpointHost.getBytes(StandardCharsets.UTF_8);
+			output.writeInt(NetUtils.MAGIC_AMMH);
+			output.writeShort(host.length);
+			output.write(host);
+			output.flush();
+			assertEquals(NetUtils.MAGIC_AMOK, new DataInputStream(plain.getInputStream()).readInt());
+			try (SSLSocket socket = CandidateTrustValidation.wrapWithTls(plain, CandidateTrustValidation.newSslContext(manager), endpointHost, server.port())) {
+				assertEquals(trustedCa && endpointHost.equals("127.0.0.1"), manager.getDeferredFailure(socket) == null);
+				CompletableFuture<Void> judged = CandidateTrustValidation.validate(new CandidateTrustValidation.Candidate(socket, manager, trust, "127.0.0.2", endpointHost,
+						ignored -> {
+							prompts.incrementAndGet();
+							return CompletableFuture.completedFuture(false);
+						}, () -> true, "127.0.0.1:" + server.port(), null, configured), Duration.ofHours(1));
+				if (accepted) {
+					judged.get(AWAIT_SECONDS, TimeUnit.SECONDS);
+					assertEquals(0, prompts.get(), "configured CA front must not prompt");
+				} else {
+					assertThrows(Exception.class, () -> judged.get(AWAIT_SECONDS, TimeUnit.SECONDS));
+					assertEquals(expectedPin == null ? 1 : 0, prompts.get(), "invalid chain/hostname needs consent; changed pin fails outright");
+				}
+			}
+		}
+	}
+
 	/** A minimal WebPKI stand-in: a self-styled CA, or a leaf it signs, with dNSName and iPAddress SAN entries. */
 	private static X509Certificate mint(X500Principal subject, PublicKey publicKey, X500Principal issuer, PrivateKey issuerKey, boolean certificateAuthority,
 			List<Object[]> sans) throws Exception {
@@ -288,7 +340,7 @@ class DownloadClientTest {
 		try (TransferServer server = new TransferServer(keyPair, certificate)) {
 			ConnectionJsons.ConnectionInfo connectionInfo = new ConnectionJsons.ConnectionInfo(InetSocketAddress.createUnresolved("127.0.0.1", 25565),
 					new InetSocketAddress(InetAddress.getLoopbackAddress(), server.port()), ModpackConnectionMode.MAGIC, null);
-			CompletableFuture<DownloadClient> clientFuture = DownloadClient.createAsync(connectionInfo, null, ignored -> decision, Duration.ofMillis(100));
+			CompletableFuture<DownloadClient> clientFuture = DownloadClient.createAsync(connectionInfo, null, ignored -> decision, Duration.ofMillis(100), NetUtils.USER_AGENT + " tech-required-only/1");
 
 			long deadline = System.currentTimeMillis() + 5000;
 			while (server.heartbeats() < 2 && System.currentTimeMillis() < deadline)
@@ -306,6 +358,8 @@ class DownloadClientTest {
 					Thread.sleep(20);
 				assertEquals(heartbeatsAtConfiguration, server.heartbeats());
 				assertEquals(List.of("/objects/hash"), server.requests());
+				assertTrue(server.userAgents.size() >= 3);
+				assertTrue(server.userAgents.stream().allMatch(value -> value.equals(NetUtils.USER_AGENT + " tech-required-only/1")), "heartbeat and application requests must stay on the same release track");
 			}
 			assertEquals(1, server.acceptedConnections());
 		}
@@ -319,7 +373,8 @@ class DownloadClientTest {
 		try (LeasingServer server = new LeasingServer(keyPair, certificate)) {
 			ConnectionJsons.ConnectionInfo connectionInfo = new ConnectionJsons.ConnectionInfo(InetSocketAddress.createUnresolved("127.0.0.1", 25565),
 					new InetSocketAddress(InetAddress.getLoopbackAddress(), server.port()), ModpackConnectionMode.MAGIC, fingerprint);
-			try (DownloadClient client = DownloadClient.createAsync(connectionInfo, null, ignored -> CompletableFuture.completedFuture(false)).get(AWAIT_SECONDS, TimeUnit.SECONDS)) {
+			try (DownloadClient client = DownloadClient.createAsync(connectionInfo, null, ignored -> CompletableFuture.completedFuture(false), Duration.ofSeconds(10), NetUtils.USER_AGENT + " tech-required-only/1")
+					.get(AWAIT_SECONDS, TimeUnit.SECONDS)) {
 				CompletableFuture<Path> first = client.downloadSmallObject("hash".getBytes(StandardCharsets.UTF_8), directory.resolve("first"), -1L, null);
 				assertTrue(server.receivedRequest().await(AWAIT_SECONDS, TimeUnit.SECONDS));
 				int connectionsAtAbort = server.acceptedConnections();
@@ -334,6 +389,8 @@ class DownloadClientTest {
 				server.allowResponses(2);
 				assertEquals(directory.resolve("second"), second.get(AWAIT_SECONDS, TimeUnit.SECONDS));
 				assertTrue(server.acceptedConnections() > connectionsAtAbort, "a later download on the same client must open a fresh lane");
+				assertTrue(server.userAgents.size() >= 2);
+				assertTrue(server.userAgents.stream().allMatch(value -> value.equals(NetUtils.USER_AGENT + " tech-required-only/1")), "replacement lanes must retain the frozen release track");
 			}
 		}
 	}
@@ -511,7 +568,7 @@ class DownloadClientTest {
 		return new JcaX509CertificateConverter().getCertificate(builder.build(signer));
 	}
 
-	private record HttpRequest(String path, String range) {}
+	private record HttpRequest(String path, String range, String userAgent) {}
 
 	private static HttpRequest readRequest(InputStream in) throws IOException {
 		ByteArrayOutputStream head = new ByteArrayOutputStream(512);
@@ -527,12 +584,14 @@ class DownloadClientTest {
 		String[] requestLine = lines[0].split(" ");
 		if (requestLine.length != 3 || !requestLine[0].equals("GET")) return null;
 		String range = null;
+		String userAgent = null;
 		for (int i = 1; i < lines.length - 1; i++) {
 			int colon = lines[i].indexOf(':');
 			if (colon <= 0) continue;
 			if (lines[i].substring(0, colon).trim().toLowerCase(Locale.ROOT).equals("range")) range = lines[i].substring(colon + 1).trim();
+			if (lines[i].substring(0, colon).trim().equalsIgnoreCase("user-agent")) userAgent = lines[i].substring(colon + 1).trim();
 		}
-		return new HttpRequest(requestLine[1], range);
+		return new HttpRequest(requestLine[1], range, userAgent);
 	}
 
 	private static void respond(BufferedOutputStream out, String status, byte[] body, String... headers) throws IOException {
@@ -551,6 +610,7 @@ class DownloadClientTest {
 		private final ServerSocket server;
 		private final SSLContext context;
 		private final ExecutorService executor = Executors.newCachedThreadPool();
+		private final List<String> userAgents = new CopyOnWriteArrayList<>();
 		private final List<SSLSocket> sockets = new CopyOnWriteArrayList<>();
 		private final AtomicInteger acceptedConnections = new AtomicInteger();
 		private final AtomicInteger requestsArrived = new AtomicInteger();
@@ -611,6 +671,7 @@ class DownloadClientTest {
 				while (!closed && !socket.isClosed()) {
 					HttpRequest request = readRequest(in);
 					if (request == null) return;
+					userAgents.add(request.userAgent());
 					receivedRequest.countDown();
 					requestsArrived.incrementAndGet();
 					responder.execute(() -> {
@@ -803,6 +864,7 @@ class DownloadClientTest {
 		private final AtomicInteger acceptedConnections = new AtomicInteger();
 		private final AtomicInteger heartbeats = new AtomicInteger();
 		private final List<String> requests = new CopyOnWriteArrayList<>();
+		private final List<String> userAgents = new CopyOnWriteArrayList<>();
 		private final CompletableFuture<Integer> earlyApplicationByte = new CompletableFuture<>();
 		private volatile SSLSocket socket;
 		private volatile boolean closed;
@@ -860,6 +922,7 @@ class DownloadClientTest {
 						return;
 					}
 					if (request == null) return;
+					userAgents.add(request.userAgent());
 					if (request.path().equals("/head")) {
 						heartbeats.incrementAndGet();
 						respond(out, "200 OK", new byte[0]);

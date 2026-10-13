@@ -10,7 +10,9 @@ import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
+import java.util.TreeSet;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -22,8 +24,11 @@ import pl.skidam.automodpack_core.auth.Secrets;
 import pl.skidam.automodpack_core.config.ConfigTools;
 import pl.skidam.automodpack_core.config.ConnectionJsons;
 import pl.skidam.automodpack_core.config.GenerationJsons;
+import pl.skidam.automodpack_core.config.ModpackJsons;
 import pl.skidam.automodpack_core.modpack.ModpackId;
 import pl.skidam.automodpack_core.modpack.generation.GenerationHosting;
+import pl.skidam.automodpack_core.modpack.generation.Journal;
+import pl.skidam.automodpack_core.modpack.group.GroupManifestValidator;
 import pl.skidam.automodpack_core.protocol.CertificateTrustCancelledException;
 import pl.skidam.automodpack_core.protocol.DocumentFetch;
 import pl.skidam.automodpack_core.protocol.DownloadClient;
@@ -96,7 +101,7 @@ public final class ManifestFetcher {
 			return CompletableFuture.completedFuture(new ManifestFetchResult(connectionFailedState, null, null, new IllegalArgumentException("Connection origin or endpoint is missing")));
 		}
 
-		CompletableFuture<ManifestFetchResult> fetch = DownloadClient.createAsync(connectionInfo, secret == null ? null : secret.secret(), manualValidationCallbackAsync(connectionInfo, allowAskingUser))
+		CompletableFuture<ManifestFetchResult> fetch = DownloadClient.createAsync(storage, connectionInfo, secret == null ? null : secret.secret(), manualValidationCallbackAsync(connectionInfo, allowAskingUser))
 				.thenCompose(transport -> {
 					abandonment.opened.set(transport);
 					return fetchModpackContentAsync(storage, connectionInfo, transport, ModpackId.isValid(selectedModpackId) ? selectedModpackId : null).handle((fetched, error) -> {
@@ -281,7 +286,7 @@ public final class ManifestFetcher {
 			return CompletableFuture.completedFuture(null);
 		}
 		CompletableFuture<Boolean> journalSync = syncJournalMirror(storage, connectionInfo, transport, content, journalExpected, journalFetched, validators);
-		if (!fetch.unchanged()) return journalSync.thenApply(journalRefetched -> content);
+		if (!fetch.unchanged()) return journalSync.thenCompose(journalRefetched -> cacheJournalPolicies(storage, transport, content.policy.modpackId).thenApply(ignored -> content));
 		// The validator matched, so the head mirror - and the journal that vouched for it - already hold what the
 		// server serves: a journal fetch that keeps failing even after its fresh-lane re-issue must not discard a
 		// good head. The callers still verify the local projection against the content, which is what repairs a
@@ -289,7 +294,7 @@ public final class ManifestFetcher {
 		return journalSync.handle((journalRefetched, journalError) -> {
 			if (journalError != null) LOGGER.warn("The journal fetch for modpack {} kept failing; keeping the current head mirror without its journal sync", selectedModpackId, Throwables.unwrap(journalError));
 			return content;
-		});
+		}).thenCompose(current -> cacheJournalPolicies(storage, transport, current.policy.modpackId).thenApply(ignored -> current));
 	}
 
 	/**
@@ -336,6 +341,57 @@ public final class ManifestFetcher {
 				return CompletableFuture.failedFuture(e);
 			}
 		}, DownloadClient.NET_EXECUTOR).whenComplete((ignored, error) -> deleteJournalTemp(storage));
+	}
+
+	/** Cache only journal policy documents, so offline ledger replay has no missing intermediate policy. */
+	private static CompletableFuture<Void> cacheJournalPolicies(ClientStorage storage, PackTransport transport, String modpackId) {
+		try {
+			var hashes = new TreeSet<String>();
+			for (var entry : Journal.openComplete(storage.historyJournalFile(modpackId)).entries()) hashes.add(entry.policySha1());
+			CompletableFuture<Void> fetched = CompletableFuture.completedFuture(null);
+			for (String hash : hashes) fetched = fetched.thenCompose(ignored -> cachePolicy(storage, transport, modpackId, hash));
+			return fetched;
+		} catch (IOException | RuntimeException error) {
+			return CompletableFuture.failedFuture(error);
+		}
+	}
+
+	private static CompletableFuture<Void> cachePolicy(ClientStorage storage, PackTransport transport, String modpackId, String hash) {
+		Path object = storage.objectFile(hash);
+		try {
+			if (Files.exists(object, LinkOption.NOFOLLOW_LINKS)) {
+				validatePolicy(object, modpackId, hash);
+				return CompletableFuture.completedFuture(null);
+			}
+			Path temporary = Files.createTempFile(storage.clientDirectory(), "history-policy-", ".json");
+			return transport.downloadSmallObject(hash.getBytes(StandardCharsets.UTF_8), temporary, -1L, null).thenAcceptAsync(downloaded -> {
+				try {
+					validatePolicy(downloaded, modpackId, hash);
+					ClientObjectStore.storeObject(storage, hash, Files.readAllBytes(downloaded));
+				} catch (IOException error) {
+					throw new CompletionException(error);
+				}
+			}, DownloadClient.NET_EXECUTOR).whenComplete((ignored, error) -> {
+				try {
+					Files.deleteIfExists(temporary);
+				} catch (IOException cleanup) {
+					LOGGER.warn("Failed to remove temporary policy download", cleanup);
+				}
+			});
+		} catch (IOException | RuntimeException error) {
+			return CompletableFuture.failedFuture(error);
+		}
+	}
+
+	private static void validatePolicy(Path object, String modpackId, String hash) throws IOException {
+		if (!Files.isRegularFile(object, LinkOption.NOFOLLOW_LINKS) || !hash.equals(HashUtils.getHash(object)))
+			throw new IOException("Journal policy bytes do not match their content hash: " + hash);
+		try {
+			var fields = ConfigTools.read(object, ModpackJsons.CompleteModpackContentFields.class).orElseThrow();
+			if (!modpackId.equals(GroupManifestValidator.validate(fields).modpackId())) throw new IOException("Journal policy belongs to another modpack: " + hash);
+		} catch (RuntimeException error) {
+			throw new IOException("Journal policy document is invalid: " + hash, error);
+		}
 	}
 
 	private static Function<X509Certificate, CompletableFuture<Boolean>> manualValidationCallbackAsync(ConnectionJsons.ConnectionInfo connectionInfo, boolean allowAskingUser) {

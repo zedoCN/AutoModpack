@@ -256,6 +256,10 @@ public class ModpackUpdater implements AutoCloseable {
 		return beginAttempt(newSession());
 	}
 
+	boolean hasAutomaticUpdateConsent() {
+		return selectedTarget != null && TrustedUpdatePolicy.allowsPack(selectedTarget.manifest().modpackId(), connectionInfo);
+	}
+
 	RemovalAttempt requireRemoval(RemovalAttempt.Kind kind) {
 		UpdateAttempt current = attempt.get();
 		if (!(current instanceof RemovalAttempt removal) || removal.kind() != kind) throw new IllegalStateException("Modpack lifecycle action was not prepared");
@@ -388,7 +392,7 @@ public class ModpackUpdater implements AutoCloseable {
 		if (!offline) requireLiveConnection();
 		review.firstConnection(!new ClientGenerationStore(storage).hasLocalState(selectedTarget.manifest().modpackId()));
 		review.resetLocalModConsent();
-		if (review.firstConnection() && !applyFirstInstall) {
+		if (review.firstConnection() && !applyFirstInstall && !hasAutomaticUpdateConsent()) {
 			try (var cache = FileCache.open(storage.fileCacheDirectory())) {
 				objectAcquisition.acquireTargetObjects(selectedTarget.flatTarget(), cache, false);
 			}
@@ -405,7 +409,7 @@ public class ModpackUpdater implements AutoCloseable {
 					serverModpackContent.mcVersion, serverModpackContent.loader);
 			return;
 		}
-		if (review.planWritesUnverifiedJar(launch.prepared().plan())) {
+		if (!hasAutomaticUpdateConsent() && review.planWritesUnverifiedJar(launch.prepared().plan())) {
 			LOGGER.warn("Launch apply aborted: unverified jars will not be written during preload; leaving the live pack unchanged");
 			return;
 		}
@@ -524,6 +528,10 @@ public class ModpackUpdater implements AutoCloseable {
 			if (review.isCancelledByPlayer()) {
 				close();
 				return UpdateOutcome.INCOMPLETE;
+			}
+			if (hasAutomaticUpdateConsent()) {
+				applyInstalledSwitch();
+				return UpdateOutcome.APPLIED;
 			}
 			UpdateAttempt switchAttempt = attempt.get();
 			Runnable continueAction = () -> {

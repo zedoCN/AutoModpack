@@ -92,6 +92,10 @@ class Connection implements AutoCloseable {
 	}
 
 	Connection(SSLSocket socket, Socket transport, String secret, String hostHeader, Executor executor, Runnable onSlotFreed) throws IOException {
+		this(socket, transport, secret, hostHeader, executor, onSlotFreed, USER_AGENT);
+	}
+
+	Connection(SSLSocket socket, Socket transport, String secret, String hostHeader, Executor executor, Runnable onSlotFreed, String userAgent) throws IOException {
 		if (socket == null || socket.isClosed()) throw new IOException("Server connection is closed");
 		if (transport != null && transport.isClosed()) throw new IOException("Server connection is closed");
 		this.socket = socket;
@@ -102,7 +106,7 @@ class Connection implements AutoCloseable {
 		this.onSlotFreed = onSlotFreed;
 		this.requestLinePrefix = "GET ".getBytes(StandardCharsets.UTF_8);
 		String authorization = secret == null ? "" : "Authorization: Bearer " + secret + "\r\n";
-		this.requestLineSuffix = (" HTTP/1.1\r\nHost: " + hostHeader + "\r\nUser-Agent: " + USER_AGENT + "\r\n" + authorization).getBytes(StandardCharsets.UTF_8);
+		this.requestLineSuffix = (" HTTP/1.1\r\nHost: " + hostHeader + "\r\nUser-Agent: " + userAgent + "\r\n" + authorization).getBytes(StandardCharsets.UTF_8);
 	}
 
 	boolean isActive() {

@@ -57,7 +57,17 @@ public final class CandidateTrustValidation {
 
 	/** One transport candidate: its probe socket, the client's shared trust manager holding that socket's deferral, and who may accept the certificate. */
 	public record Candidate(SSLSocket socket, CustomizableTrustManager trustManager, CustomizableTrustManager.SessionTrust sessionTrust, String originHost, String endpointHost,
-			Function<X509Certificate, CompletableFuture<Boolean>> trustCallback, BooleanSupplier clientAlive, String hostHeader, String secret) {}
+			Function<X509Certificate, CompletableFuture<Boolean>> trustCallback, BooleanSupplier clientAlive, String hostHeader, String secret, boolean configuredCaEndpoint, String userAgent) {
+		public Candidate(SSLSocket socket, CustomizableTrustManager trustManager, CustomizableTrustManager.SessionTrust sessionTrust, String originHost, String endpointHost,
+				Function<X509Certificate, CompletableFuture<Boolean>> trustCallback, BooleanSupplier clientAlive, String hostHeader, String secret) {
+			this(socket, trustManager, sessionTrust, originHost, endpointHost, trustCallback, clientAlive, hostHeader, secret, false, NetUtils.USER_AGENT);
+		}
+
+		public Candidate(SSLSocket socket, CustomizableTrustManager trustManager, CustomizableTrustManager.SessionTrust sessionTrust, String originHost, String endpointHost,
+				Function<X509Certificate, CompletableFuture<Boolean>> trustCallback, BooleanSupplier clientAlive, String hostHeader, String secret, boolean configuredCaEndpoint) {
+			this(socket, trustManager, sessionTrust, originHost, endpointHost, trustCallback, clientAlive, hostHeader, secret, configuredCaEndpoint, NetUtils.USER_AGENT);
+		}
+	}
 
 	private CandidateTrustValidation() {}
 
@@ -157,10 +167,11 @@ public final class CandidateTrustValidation {
 		// carries no failure exactly when the CAs vouched for this chain, and the origin name in its SANs anchors
 		// that vouch to the address the player typed. Self-signed leaves deferred with a failure never take this
 		// step, and a CA-vouched first contact costs no DNS round trip.
-		if (candidate.trustManager().getDeferredFailure(candidate.socket()) == null && leafCoversOrigin(certificate, candidate.originHost())) {
+		if (candidate.trustManager().getDeferredFailure(candidate.socket()) == null
+				&& (leafCoversOrigin(certificate, candidate.originHost()) || candidate.configuredCaEndpoint())) {
 			try {
 				candidate.sessionTrust().accept(certificate);
-				LOGGER.info("Trusting the certificate from {} because its CA chain covers the origin {}", candidate.endpointHost(), candidate.originHost());
+				LOGGER.info("Trusting the CA-validated certificate from {} for origin {} (configured endpoint: {})", candidate.endpointHost(), candidate.originHost(), candidate.configuredCaEndpoint());
 				return CompletableFuture.completedFuture(null);
 			} catch (CertificateException e) {
 				return reject(candidate, new IOException("Cannot fingerprint the CA-signed certificate", e));
@@ -268,7 +279,7 @@ public final class CandidateTrustValidation {
 		PreConfigurationKeepalive keepalive;
 		try {
 			keepalive = new PreConfigurationKeepalive(candidate.socket(), candidate.hostHeader(), candidate.secret(), preConfigurationKeepaliveInterval,
-					PRE_CONFIGURATION_KEEPALIVE_EXECUTOR, candidate.clientAlive());
+					PRE_CONFIGURATION_KEEPALIVE_EXECUTOR, candidate.clientAlive(), candidate.userAgent());
 		} catch (IOException e) {
 			closeQuietly(candidate.socket());
 			return CompletableFuture.failedFuture(e);

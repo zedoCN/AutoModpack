@@ -29,6 +29,24 @@ class UpdatePlannerTest {
 	}
 
 	@Test
+	void firstInstallKeepChoiceLeavesUnrelatedPersonalJarInPlaceAndExplicitCleanupStillArchivesIt() {
+		ModpackJsons.ModpackContentFields target = manifest(Map.of("mods/required.jar", item("mods/required.jar", TARGET_HASH, 9, "mod")),
+				ledger(entry("mods/required.jar", TARGET_HASH, 9, OwnershipLedger.Status.PRESENT)));
+		FileState personal = new FileState(OTHER_HASH, 8, true);
+		Map<FileKey, FileState> files = Map.of(new FileKey(Root.GAME_DIR, "mods/personal.jar"), personal);
+		List<ModInfo> targetMods = List.of(new ModInfo("mods/required.jar", TARGET_HASH, 9, "1.0", Set.of("required"), Set.of()));
+		List<ModInfo> personalMods = List.of(new ModInfo("mods/personal.jar", OTHER_HASH, 8, "1.0", Set.of("personal"), Set.of()));
+		UpdatePlan keep = UpdatePlanner.plan(new UpdatePlanner.Input(null, target, files, Set.of(), targetMods, personalMods, List.of(), List.of(), null,
+				new ClientConfigJsons.ClientConfigFieldsV3(), Map.of()));
+		assertTrue(keep.operations().stream().noneMatch(operation -> operation.root() == Root.GAME_DIR && operation.relativePath().equals("mods/personal.jar")));
+		assertTrue(keep.projectedFinalState().stream().anyMatch(file -> file.root() == Root.GAME_DIR && file.relativePath().equals("mods/personal.jar") && file.present()));
+		UpdatePlan archive = UpdatePlanner.plan(new UpdatePlanner.Input(null, target, files, Set.of(), targetMods, personalMods, List.of(), List.of(), null,
+				new ClientConfigJsons.ClientConfigFieldsV3(), Map.of("mods/personal.jar", personal)));
+		assertTrue(archive.operations().stream().anyMatch(operation -> operation.root() == Root.GAME_DIR && operation.relativePath().equals("mods/personal.jar") && operation.operation() == OperationType.DELETE));
+		assertTrue(archive.preservations().stream().anyMatch(preservation -> preservation.relativePath().equals("mods/personal.jar") && preservation.proof() == PreservationProof.PLAYER_CONSENT));
+	}
+
+	@Test
 	void configOnlyGroupChangeRequestsNoRestart() {
 		String path = "config/example.toml";
 		ModpackJsons.ModpackContentFields installed = manifest(Map.of(path, item(path, TARGET_HASH, 9, "config")),

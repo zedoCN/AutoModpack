@@ -27,6 +27,9 @@ public class ClientConfigJsons {
 		@ReconfConfigs.Comment("mod ids that keep loading from this instance's own mods folder")
 		@SerializedName("pinned-mod-ids")
 		public List<String> pinnedModIds = new ArrayList<>();
+		@ReconfConfigs.Comment("require platform verification and the unverified-mod confirmation before installing updates")
+		@SerializedName("confirm-unverified-mods")
+		public boolean confirmUnverifiedMods = true;
 
 		public ClientConfigFieldsV3() {}
 
@@ -38,6 +41,7 @@ public class ClientConfigJsons {
 			this.playMusic = source.playMusic;
 			this.showModpackSettingsButton = source.showModpackSettingsButton;
 			this.pinnedModIds = new ArrayList<>(PinnedMods.normalize(source.pinnedModIds));
+			this.confirmUnverifiedMods = source.confirmUnverifiedMods;
 		}
 
 		public ClientConfigFieldsV3 withPlayMusic(boolean playMusic) {
@@ -66,6 +70,7 @@ public class ClientConfigJsons {
 			if (showModpackSettingsButton == expected.showModpackSettingsButton) rebased.showModpackSettingsButton = planned.showModpackSettingsButton;
 			if (Objects.equals(PinnedMods.normalize(pinnedModIds), PinnedMods.normalize(expected.pinnedModIds)))
 				rebased.pinnedModIds = new ArrayList<>(PinnedMods.normalize(planned.pinnedModIds));
+			if (confirmUnverifiedMods == expected.confirmUnverifiedMods) rebased.confirmUnverifiedMods = planned.confirmUnverifiedMods;
 			return rebased;
 		}
 
@@ -76,12 +81,14 @@ public class ClientConfigJsons {
 			return updateSelectedModpackOnLaunch == other.updateSelectedModpackOnLaunch && selfUpdater == other.selfUpdater
 					&& syncAutoModpackVersion == other.syncAutoModpackVersion && syncVersions == other.syncVersions && playMusic == other.playMusic
 					&& showModpackSettingsButton == other.showModpackSettingsButton
-					&& Objects.equals(PinnedMods.normalize(pinnedModIds), PinnedMods.normalize(other.pinnedModIds));
+					&& Objects.equals(PinnedMods.normalize(pinnedModIds), PinnedMods.normalize(other.pinnedModIds))
+					&& confirmUnverifiedMods == other.confirmUnverifiedMods;
 		}
 
 		@Override
 		public int hashCode() {
-			return Objects.hash(updateSelectedModpackOnLaunch, selfUpdater, syncAutoModpackVersion, syncVersions, playMusic, showModpackSettingsButton, PinnedMods.normalize(pinnedModIds));
+			return Objects.hash(updateSelectedModpackOnLaunch, selfUpdater, syncAutoModpackVersion, syncVersions, playMusic, showModpackSettingsButton, PinnedMods.normalize(pinnedModIds),
+					confirmUnverifiedMods);
 		}
 
 		@Override

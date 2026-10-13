@@ -667,7 +667,11 @@ public final class UpdateTransactionExecutor {
 			// as a lock is the conservative reading: the accepted cost is a permanent permission failure that
 			// defers with a locked-file story, because the alternative misclassifies a genuine in-use file as
 			// a terminal error. Other kernels name the sharing conflict in the message - only those count.
-			if (windows && current instanceof AccessDeniedException) return true;
+			// Windows ERROR_SHARING_VIOLATION can also arrive as the plain FileSystemException, with a
+			// localized reason and no exposed numeric error code. Defer plain storage failures once to the
+			// exit helper; specific errors such as NoSuchFileException still fail immediately. A permanent
+			// generic storage/permission error may therefore be deferred, then fail in the helper.
+			if (windows && (current instanceof AccessDeniedException || current.getClass() == FileSystemException.class)) return true;
 			if (current instanceof FileSystemException fileSystemException) {
 				String detail = (Objects.toString(fileSystemException.getReason(), "") + " " + Objects.toString(fileSystemException.getMessage(), "")).toLowerCase(Locale.ROOT);
 				if (detail.contains("used by another process") || detail.contains("being used by another process") || detail.contains("sharing violation")) return true;

@@ -36,11 +36,15 @@ final class PreConfigurationKeepalive {
 	private boolean retired;
 
 	PreConfigurationKeepalive(SSLSocket socket, String hostHeader, String secret, Duration interval, ScheduledExecutorService executor, BooleanSupplier alive) throws IOException {
+		this(socket, hostHeader, secret, interval, executor, alive, USER_AGENT);
+	}
+
+	PreConfigurationKeepalive(SSLSocket socket, String hostHeader, String secret, Duration interval, ScheduledExecutorService executor, BooleanSupplier alive, String userAgent) throws IOException {
 		this.socket = socket;
 		this.alive = alive;
 		// The Authorization header rides the heartbeat too: a host with validateSecrets on answers an unauthenticated heartbeat with a 401 and a close, killing the connection the heartbeat exists to keep alive.
 		String authorization = secret == null ? "" : "Authorization: Bearer " + secret + "\r\n";
-		this.heartbeat = ("GET /head HTTP/1.1\r\nHost: " + hostHeader + "\r\nUser-Agent: " + USER_AGENT + "\r\n" + authorization + "\r\n")
+		this.heartbeat = ("GET /head HTTP/1.1\r\nHost: " + hostHeader + "\r\nUser-Agent: " + userAgent + "\r\n" + authorization + "\r\n")
 				.getBytes(StandardCharsets.UTF_8);
 		this.in = new BufferedInputStream(socket.getInputStream());
 		this.task = executor.scheduleWithFixedDelay(this::tick, interval.toMillis(), interval.toMillis(), TimeUnit.MILLISECONDS);

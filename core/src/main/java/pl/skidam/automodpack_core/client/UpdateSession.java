@@ -89,7 +89,7 @@ final class UpdateSession implements UpdateAttempt {
 		try (var cache = FileCache.open(storage.fileCacheDirectory()); var modCache = ModFileCache.open(storage.modCacheDirectory())) {
 			objectAcquisition.acquireTargetObjects(target.flatTarget(), cache, playerFacing);
 			// A review presented to the player must not have its unverified verdict flipped by a late platform lookup; the preload path never waits on platform APIs.
-			if (playerFacing) sourceCatalogue.awaitSourceLookup();
+			if (playerFacing && !TrustedUpdatePolicy.allowsPack(target.manifest().modpackId(), connectionInfo)) sourceCatalogue.awaitSourceLookup();
 			ClientProjectionView projectionView = ClientProjectionView.observe(storage);
 			planBuilder.reconcileEditableState(cache, projectionView, target.flatTarget());
 			prepared = planBuilder.buildPlan(planInput(true), projectionView, cache, modCache);

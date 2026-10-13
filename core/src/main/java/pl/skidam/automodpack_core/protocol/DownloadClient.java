@@ -35,9 +35,12 @@ import java.util.function.IntConsumer;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 
+import pl.skidam.automodpack_core.client.TechReleaseTrack;
+import pl.skidam.automodpack_core.client.TrustedUpdatePolicy;
 import pl.skidam.automodpack_core.config.ConnectionJsons;
 import pl.skidam.automodpack_core.loader.LoaderManagerService;
 import pl.skidam.automodpack_core.protocol.Connection.ObjectTake;
+import pl.skidam.automodpack_core.update.ClientStorage;
 import pl.skidam.automodpack_core.utils.AddressHelpers;
 import pl.skidam.automodpack_core.utils.ByteFormat;
 import pl.skidam.automodpack_core.utils.Throwables;
@@ -100,6 +103,7 @@ public class DownloadClient implements PackTransport {
 	// byte tripwires in NetUtils bound the hold; the scheduler dispatches large files to their own workers first, and
 	// a non-draining peer trips the 90 s stall window on its lane alone.
 	private final List<Connection> lanes = new ArrayList<>();
+	private final String userAgent;
 	private final Deque<SlotWaiter<?>> slotWaiters = new ArrayDeque<>();
 	private int openingConnections;
 	private volatile boolean closed;
@@ -109,7 +113,8 @@ public class DownloadClient implements PackTransport {
 	private record TlsCandidate(SSLSocket socket, Socket transport) {}
 
 	private DownloadClient(ConnectionJsons.ConnectionInfo connectionInfo, String secret, Function<X509Certificate, CompletableFuture<Boolean>> trustCallback,
-			Duration preConfigurationKeepaliveInterval, TransportRoute route) {
+			Duration preConfigurationKeepaliveInterval, TransportRoute route, String userAgent) {
+		this.userAgent = userAgent;
 		this.connectionInfo = connectionInfo;
 		this.secret = secret;
 		this.trustCallback = trustCallback;
@@ -135,14 +140,24 @@ public class DownloadClient implements PackTransport {
 		return createAsync(connectionInfo, secret, trustCallback, PRE_CONFIGURATION_KEEPALIVE_INTERVAL);
 	}
 
+	public static CompletableFuture<DownloadClient> createAsync(ClientStorage storage, ConnectionJsons.ConnectionInfo connectionInfo, String secret,
+			Function<X509Certificate, CompletableFuture<Boolean>> trustCallback) {
+		return createAsync(connectionInfo, secret, trustCallback, PRE_CONFIGURATION_KEEPALIVE_INTERVAL, TechReleaseTrack.userAgent(storage, connectionInfo));
+	}
+
 	/** The keepalive interval is injectable so tests can observe heartbeats at a fast cadence; production runs at {@link NetUtils#PRE_CONFIGURATION_KEEPALIVE_INTERVAL}. */
 	static CompletableFuture<DownloadClient> createAsync(ConnectionJsons.ConnectionInfo connectionInfo, String secret,
 			Function<X509Certificate, CompletableFuture<Boolean>> trustCallback, Duration preConfigurationKeepaliveInterval) {
+		return createAsync(connectionInfo, secret, trustCallback, preConfigurationKeepaliveInterval, USER_AGENT);
+	}
+
+	static CompletableFuture<DownloadClient> createAsync(ConnectionJsons.ConnectionInfo connectionInfo, String secret,
+			Function<X509Certificate, CompletableFuture<Boolean>> trustCallback, Duration preConfigurationKeepaliveInterval, String userAgent) {
 		if (connectionInfo == null || !connectionInfo.isComplete())
 			return CompletableFuture.failedFuture(new IllegalArgumentException("Connection origin or endpoint is missing"));
 
 		return resolveRouteAsync(connectionInfo).thenCompose(route -> {
-			DownloadClient client = new DownloadClient(connectionInfo, secret, trustCallback, preConfigurationKeepaliveInterval, route);
+			DownloadClient client = new DownloadClient(connectionInfo, secret, trustCallback, preConfigurationKeepaliveInterval, route, userAgent);
 			return client.openConnectionAsync().thenApply(connection -> {
 				synchronized (client.poolLock) {
 					client.lanes.add(connection);
@@ -293,14 +308,15 @@ public class DownloadClient implements PackTransport {
 	/** The shared candidate trust ladder; completion means the certificate is pinned into this session's trust. */
 	private CompletableFuture<TlsCandidate> validateCandidate(TlsCandidate candidate) {
 		return CandidateTrustValidation.validate(new CandidateTrustValidation.Candidate(candidate.socket(), trustManager, sessionTrust, connectionInfo.origin.getHostString(),
-				connectionInfo.endpoint.getHostString(), trustCallback, () -> !closed, hostHeader(), secret), preConfigurationKeepaliveInterval).thenApply(ignored -> candidate);
+				connectionInfo.endpoint.getHostString(), trustCallback, () -> !closed, hostHeader(), secret, TrustedUpdatePolicy.allowsCaEndpoint(connectionInfo), userAgent), preConfigurationKeepaliveInterval)
+				.thenApply(ignored -> candidate);
 	}
 
 	/** Turns a validated candidate into a pooled connection, releasing the socket when construction fails. */
 	private Connection configuredConnection(TlsCandidate candidate) throws IOException {
 		try {
 			candidate.socket().setSoTimeout(TRANSFER_IDLE_TIMEOUT_MILLIS);
-			return new Connection(candidate.socket(), candidate.transport(), secret, hostHeader(), NET_EXECUTOR, this::slotFreed);
+			return new Connection(candidate.socket(), candidate.transport(), secret, hostHeader(), NET_EXECUTOR, this::slotFreed, userAgent);
 		} catch (IOException e) {
 			closeQuietly(candidate.socket());
 			throw e;

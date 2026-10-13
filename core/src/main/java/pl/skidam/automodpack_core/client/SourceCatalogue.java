@@ -1,5 +1,7 @@
 package pl.skidam.automodpack_core.client;
 
+import static pl.skidam.automodpack_core.Constants.clientConfig;
+
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -161,7 +163,7 @@ final class SourceCatalogue {
 	}
 
 	private FetchManager newSourceFetchManager(List<FetchManager.FetchData> fetchData) {
-		if (fetchData.isEmpty()) return null;
+		if (fetchData.isEmpty() || clientConfig != null && !clientConfig.confirmUnverifiedMods) return null;
 		FetchManager manager = new FetchManager(fetchData, platformCache);
 		manager.fetchAsync();
 		return manager;

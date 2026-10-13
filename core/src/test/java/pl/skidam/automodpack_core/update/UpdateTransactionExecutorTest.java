@@ -5,13 +5,18 @@ import static org.junit.jupiter.api.Assertions.*;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AccessDeniedException;
+import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.FileSystemException;
 import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
+import java.util.zip.ZipOutputStream;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -38,6 +43,7 @@ import pl.skidam.automodpack_core.update.UpdatePlan.Root;
 import pl.skidam.automodpack_core.utils.FileIntegrity;
 import pl.skidam.automodpack_core.utils.HashUtils;
 import pl.skidam.automodpack_core.utils.ImmutableFiles;
+import pl.skidam.automodpack_core.utils.PlatformUtils;
 import pl.skidam.automodpack_core.utils.cache.FileCache;
 
 class UpdateTransactionExecutorTest {
@@ -890,6 +896,58 @@ class UpdateTransactionExecutorTest {
 		assertTrue(UpdateTransactionExecutor.isLockFailure(new AccessDeniedException("active", "backup", null), true));
 		assertFalse(UpdateTransactionExecutor.isLockFailure(new AccessDeniedException("active", "backup", null), false));
 		assertTrue(UpdateTransactionExecutor.isLockFailure(new FileSystemException("active", "backup", "being used by another process"), false));
+	}
+
+	@Test
+	void windowsSharingViolationsAreRecoverableRegardlessOfTheOperatingSystemLanguage() {
+		IOException chinese = new FileSystemException("mods/old.jar", "backup/old.jar", "另一个程序正在使用此文件，进程无法访问。");
+		assertTrue(UpdateTransactionExecutor.isLockFailure(chinese, true));
+		assertTrue(UpdateTransactionExecutor.isLockFailure(new IOException("move failed", chinese), true));
+		assertFalse(UpdateTransactionExecutor.isLockFailure(chinese, false));
+		assertTrue(UpdateTransactionExecutor.isLockFailure(new FileSystemException("a", "b", "Le processus ne peut pas accéder au fichier"), true));
+		assertFalse(UpdateTransactionExecutor.isLockFailure(new NoSuchFileException("missing.jar"), true));
+		assertFalse(UpdateTransactionExecutor.isLockFailure(new FileAlreadyExistsException("target.jar"), true));
+	}
+
+	@Test
+	void realOpenJarHandleDefersWindowsDeleteAndRecoversAfterCloseWhileKeepingPersonalExtras() throws Exception {
+		ClientStorage storage = UpdateTestFixtures.storage(temporaryDirectory);
+		Path held = storage.gamePath("mods/held.jar");
+		try (ZipOutputStream out = new ZipOutputStream(Files.newOutputStream(held))) {
+			out.putNextEntry(new ZipEntry("test.txt"));
+			out.write("held content".getBytes(StandardCharsets.UTF_8));
+			out.closeEntry();
+		}
+		String heldHash = HashUtils.getHash(held);
+		Path personal = storage.gamePath("mods/personal.jar");
+		Files.writeString(personal, "unchanged personal bytes");
+		byte[] personalBytes = Files.readAllBytes(personal);
+		byte[] bytes = "replacement config".getBytes(StandardCharsets.UTF_8);
+		String hash = store(storage, bytes);
+		var target = UpdateTestFixtures.target(storage, "config/example.txt", "config", false, hash, bytes.length);
+		var plan = UpdateTestFixtures.plan(target, clientConfig(target.manifest().modpackId()), List.of(
+				new Operation(Root.PROJECTION, "config/example.txt", OperationType.INSTALL_OBJECT, hash, bytes.length, null),
+				new Operation(Root.GAME_DIR, "mods/held.jar", OperationType.DELETE, null, -1, heldHash)),
+				List.of(new ProjectedFile(Root.PROJECTION, "config/example.txt", true, hash, bytes.length), new ProjectedFile(Root.GAME_DIR, "mods/held.jar", false, null, -1)));
+		boolean windows = PlatformUtils.operatingSystem() == PlatformUtils.OperatingSystem.WINDOWS;
+		try (ZipFile open = new ZipFile(held.toFile())) {
+			assertEquals("held content", new String(open.getInputStream(open.getEntry("test.txt")).readAllBytes(), StandardCharsets.UTF_8));
+			var applied = UpdateTestFixtures.commit(storage, plan, target);
+			if (windows) {
+				assertEquals(UpdateTransaction.Status.DEFERRED_LOCKED, applied.status(), applied::message);
+				assertTrue(Files.exists(storage.transactionFile()));
+				assertEquals(heldHash, HashUtils.getHash(held));
+			} else {
+				assertTrue(applied.success(), applied::message);
+				assertFalse(Files.exists(held), "POSIX open descriptors permit unlink while the old handle remains readable");
+			}
+			assertArrayEquals(personalBytes, Files.readAllBytes(personal));
+		}
+		if (windows) assertTrue(UpdateTestFixtures.executor(storage).recoverLatest().success());
+		assertFalse(Files.exists(held));
+		assertFalse(Files.exists(storage.transactionFile()));
+		assertArrayEquals(personalBytes, Files.readAllBytes(personal));
+		assertEquals(hash, HashUtils.getHash(storage.activePath("config/example.txt")));
 	}
 
 	private static ModpackJsons.CompleteModpackContentFields reorganizedFields(String hash, long size) {

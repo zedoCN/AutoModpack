@@ -61,6 +61,7 @@ final class ReviewSession {
 	private final AtomicBoolean playerCancelled;
 	private final AtomicReference<ConfirmationState> confirmationState = new AtomicReference<>(ConfirmationState.INACTIVE);
 	private boolean firstConnection;
+	private boolean keepExistingMods = true;
 	private Map<String, UpdatePlan.FileState> firstInstallLocalModFiles = Map.of();
 	private Map<String, UpdatePlan.FileState> consentedLocalModFiles = Map.of();
 
@@ -82,6 +83,7 @@ final class ReviewSession {
 	/** Clears any earlier review's leftover consent so a launch apply can never inherit it. */
 	void resetLocalModConsent() {
 		consentedLocalModFiles = Map.of();
+		keepExistingMods = true;
 	}
 
 	Map<String, UpdatePlan.FileState> consentedLocalModFiles() {
@@ -108,7 +110,7 @@ final class ReviewSession {
 		}
 		return new ReviewPayload(updater.getSelectedTarget(), reviewCatalogue(), getFirstInstallPatchNotes(), joinOrigin(), unverifiedSelectedJarPaths(),
 				sourceCatalogue.selectedJarSourceCounts(updater.getSelectedTarget()), firstInstallLocalModPaths(),
-				uncached < 0 ? OptionalLong.empty() : OptionalLong.of(uncached), reviewActions());
+				uncached < 0 ? OptionalLong.empty() : OptionalLong.of(uncached), keepExistingMods, reviewActions());
 	}
 
 	public List<JournalEntry> getFirstInstallPatchNotes() {
@@ -135,6 +137,7 @@ final class ReviewSession {
 	/** Sets the first-install cleanup consent represented in the canonical update plan. */
 	void setFirstInstallLocalModCleanup(boolean archive) {
 		if (!firstConnection || confirmationState.get() != ConfirmationState.WAITING) return;
+		keepExistingMods = !archive;
 		consentedLocalModFiles = archive ? firstInstallLocalModFiles : Map.of();
 	}
 
@@ -168,6 +171,13 @@ final class ReviewSession {
 		firstInstallLocalModFiles = updater.storedTarget() == null ? scanFirstInstallLocalMods() : Map.of();
 		if (isCancelledByPlayer()) throw new InterruptedException("Modpack update cancelled by the player");
 		if (!beginConfirmation()) throw new IllegalStateException("Modpack confirmation is already active");
+		if (updater.hasAutomaticUpdateConsent()) {
+			// Keep the existing group selection and all extra local mods: no cleanup consent is granted.
+			keepExistingMods = true;
+			consentedLocalModFiles = Map.of();
+			startConfirmedUpdate();
+			return;
+		}
 		ScreenManager.welcome(reviewPayload());
 	}
 
@@ -315,7 +325,7 @@ final class ReviewSession {
 			if (!confirmationState.compareAndSet(ConfirmationState.PREVIEWING, ConfirmationState.STARTED)) return PreviewRequestResult.PREVIEW_NOT_SHOWN;
 			return previewResult(updater.applyApprovedPlan(session, System.currentTimeMillis()));
 		}
-		if (!session.requiresPlayerReview()) {
+		if (updater.hasAutomaticUpdateConsent() || !session.requiresPlayerReview()) {
 			session.approve();
 			return previewResult(updater.applyApprovedPlan(session, System.currentTimeMillis()));
 		}

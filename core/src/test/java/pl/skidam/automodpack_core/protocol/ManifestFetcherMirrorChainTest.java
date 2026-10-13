@@ -24,9 +24,11 @@ import pl.skidam.automodpack_core.config.ConnectionJsons;
 import pl.skidam.automodpack_core.config.GenerationJsons;
 import pl.skidam.automodpack_core.modpack.generation.Journal;
 import pl.skidam.automodpack_core.modpack.generation.JournalEntry;
+import pl.skidam.automodpack_core.modpack.generation.PackDocument;
 import pl.skidam.automodpack_core.modpack.generation.TestPacks;
 import pl.skidam.automodpack_core.modpack.group.GroupManifest;
 import pl.skidam.automodpack_core.storage.TestDataRoot;
+import pl.skidam.automodpack_core.update.ClientGenerationStore;
 import pl.skidam.automodpack_core.update.ClientStorage;
 import pl.skidam.automodpack_core.utils.HashUtils;
 
@@ -158,6 +160,57 @@ class ManifestFetcherMirrorChainTest {
 		var lastTwo = server.ifNoneMatchLog.subList(server.ifNoneMatchLog.size() - 2, server.ifNoneMatchLog.size());
 		assertTrue(lastTwo.get(0).contains(server.foreignEtag(newHeadBytes)), "head validator must be the new generation's etag");
 		assertTrue(lastTwo.get(1).contains(server.foreignEtag(newJournalBytes)), "journal validator must be the new generation's etag");
+	}
+
+	@Test
+	void fillsMissingIntermediatePoliciesForOfflineHistoryAndReusesCache() throws Exception {
+		server = new ConditionalFetchTest.ContractServer();
+		ClientStorage fixture = TestDataRoot.open(temporaryDirectory.resolve("fixture"), temporaryDirectory.resolve("fixture-data"));
+		PackDocument previous = null;
+		for (String text : List.of("first", "middle", "latest")) {
+			GroupManifest manifest = TestPacks.manifest(text, "config/example.txt", text);
+			PackDocument document = TestPacks.document(manifest, previous == null ? null : previous.ownershipLedger(), TestPacks.CREATED.plusSeconds(text.length()));
+			TestPacks.stageGeneration(fixture, document);
+			server.store().put(document.policySha1(), Files.readAllBytes(fixture.objectFile(document.policySha1())));
+			previous = document;
+		}
+		var head = TestPacks.head(previous.manifest());
+		head.ownershipLedger = previous.ownershipLedger().toFields();
+		server.store().put("head", ConfigTools.GSON.toJson(head).getBytes(StandardCharsets.UTF_8));
+		server.store().put("journal", Files.readAllBytes(fixture.historyJournalFile(MODPACK_ID)));
+		ClientStorage storage = storage();
+		var result = ManifestFetcher.requestServerModpackContentAsync(storage, connectionInfo(), secret(), false, MODPACK_ID).get(20, TimeUnit.SECONDS);
+		assertTrue(result.successful(), () -> String.valueOf(result.failure()));
+		assertEquals(previous.contentToken(), new ClientGenerationStore(storage).newestDocument(MODPACK_ID).contentToken());
+		assertEquals(2, server.requests.stream().filter(path -> path.startsWith("/objects/")).count(), "only the two missing historical policies are fetched");
+		storage.writeActiveState(MODPACK_ID, head.contentToken, head.ownershipLedger);
+		int count = server.requests.size();
+		var second = ManifestFetcher.requestServerModpackContentAsync(storage, connectionInfo(), secret(), false, MODPACK_ID).get(20, TimeUnit.SECONDS);
+		assertTrue(second.successful(), () -> String.valueOf(second.failure()));
+		assertEquals(count + 2, server.requests.size(), "cached policies must avoid extra requests on the next head/journal check");
+	}
+
+	@Test
+	void wrongHistoricalPolicyHashAndMissingObjectRemainRealFailures() throws Exception {
+		server = new ConditionalFetchTest.ContractServer();
+		ClientStorage fixture = TestDataRoot.open(temporaryDirectory.resolve("fixture"), temporaryDirectory.resolve("fixture-data"));
+		var old = TestPacks.document(TestPacks.manifest("old", "config/example.txt", "old"));
+		var current = TestPacks.document(TestPacks.manifest("current", "config/example.txt", "current"), old.ownershipLedger(), TestPacks.CREATED.plusSeconds(1));
+		TestPacks.stageGeneration(fixture, old);
+		TestPacks.stageGeneration(fixture, current);
+		var head = TestPacks.head(current.manifest());
+		head.ownershipLedger = current.ownershipLedger().toFields();
+		server.store().put("head", ConfigTools.GSON.toJson(head).getBytes(StandardCharsets.UTF_8));
+		server.store().put("journal", Files.readAllBytes(fixture.historyJournalFile(MODPACK_ID)));
+		server.store().put(old.policySha1(), "wrong bytes".getBytes(StandardCharsets.UTF_8));
+		ClientStorage storage = storage();
+		var bad = ManifestFetcher.requestServerModpackContentAsync(storage, connectionInfo(), secret(), false, MODPACK_ID).get(20, TimeUnit.SECONDS);
+		assertFalse(bad.successful());
+		assertFalse(Files.exists(storage.objectFile(old.policySha1())));
+		server.store().remove(old.policySha1());
+		var missing = ManifestFetcher.requestServerModpackContentAsync(storage, connectionInfo(), secret(), false, MODPACK_ID).get(20, TimeUnit.SECONDS);
+		assertFalse(missing.successful());
+		assertThrows(IOException.class, () -> new ClientGenerationStore(storage).document(MODPACK_ID, Journal.openComplete(storage.historyJournalFile(MODPACK_ID)).entries().get(0)));
 	}
 
 	private byte[] journalBytes(String headToken, GroupManifest manifest) throws IOException {

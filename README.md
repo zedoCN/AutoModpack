@@ -1,3 +1,4 @@
+> This branch contains the unofficial TECH client customizations for NeoForge 26.2. See [TECH.md](TECH.md) for behavior, configuration, build instructions, and release provenance.
 
 **AutoModpack** is a Minecraft modification designed to **improve your private server modpack management**. Say goodbye to the days of
 struggling to get everyone on the same version! This mod **automatically synchronizes** players with the server's modpack, making playing with friends incredibly smooth and hassle-free.
