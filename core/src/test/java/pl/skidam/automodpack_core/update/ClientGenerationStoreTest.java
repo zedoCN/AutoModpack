@@ -55,14 +55,19 @@ class ClientGenerationStoreTest {
 		TestPacks.stageGeneration(storage, installed);
 		storage.writeActiveState(FIRST_PACK, installed.contentToken(), installed.ownershipLedger().toFields());
 		JournalMirror mirror = new JournalMirror(storage);
-		String replacementToken = HashUtils.sha1("replacement".getBytes(StandardCharsets.UTF_8));
+		String replacementHash = store(storage, "replacement-object");
+		PackDocument replacement = document(FIRST_PACK, replacementHash, Files.size(storage.objectFile(replacementHash)), TestPacks.CREATED);
+		ClientObjectStore.storeObject(storage, replacement.policySha1(), ConfigTools.GSON.toJson(replacement.manifest().toFields()).getBytes(StandardCharsets.UTF_8));
 		for (int attempt = 0; attempt < 2; attempt++) {
 			Path fetched = Files.createTempFile(temporaryDirectory, "replacement-", ".jsonl");
-			Journal.open(fetched).append(new JournalEntry(1, replacementToken, hash, TestPacks.CREATED, "", JournalEntry.NO_RESTORE, List.of()));
+			Journal.open(fetched).append(new JournalEntry(1, replacement.contentToken(), replacement.policySha1(), TestPacks.CREATED, "", JournalEntry.NO_RESTORE,
+					List.of(JournalEntry.Change.added("mods/test.jar", replacementHash, Files.size(storage.objectFile(replacementHash))))));
 			mirror.replaceFrom(FIRST_PACK, fetched);
-			assertEquals(replacementToken, mirror.lastEntryToken(FIRST_PACK).orElseThrow());
+			assertEquals(replacement.contentToken(), mirror.lastEntryToken(FIRST_PACK).orElseThrow());
 			assertEquals(installed, new ClientGenerationStore(storage).readActiveTarget(ClientPlatform.LINUX).orElseThrow().document());
 		}
+		new ClientGenerationStore(storage).compact();
+		assertEquals(installed, new ClientGenerationStore(storage).readActiveTarget(ClientPlatform.LINUX).orElseThrow().document());
 		Files.delete(storage.objectFile(installed.policySha1()));
 		assertThrows(IOException.class, () -> new ClientGenerationStore(storage).readActiveTarget(ClientPlatform.LINUX));
 	}

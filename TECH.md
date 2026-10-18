@@ -22,6 +22,11 @@
 
 ## 构建与验证
 
+发布历史分支替换时，客户端现在保存含当前已安装代的完整日志为
+`automodpack/client/history/<pack-id>/installed-journal.jsonl`，仅在在线镜像缺失当前代时用于重建。
+在线 head 和 journal 仍保持服务器原样；缺失或哈希不符的 policy 不会被忽略。
+已发生索引丢失的实例需要从可信本机备份恢复这份日志；不要删除 active-state 或个人模组。
+
 从本分支构建，无需再次应用旧补丁。Gradle 使用 JDK 25，core 使用 Java 17 toolchain：
 
 ```sh

@@ -43,7 +43,7 @@ import pl.skidam.automodpack_core.utils.cache.FileCache;
 /**
  * Reconstructs pack generations offline: the journal mirror supplies a generation's identity, the client CAS its
  * policy document, and the active-state pointer or the pending transaction its ownership ledger. The mirror is the
- * only history store; per-generation records are gone.
+ * fetched history store; a saved installed journal keeps the active generation readable across lineage changes.
  */
 public final class ClientGenerationStore {
 	private final ClientStorage storage;
@@ -334,6 +334,7 @@ public final class ClientGenerationStore {
 			ClientStorageJsons.ClientGenerationStateFields state = storage.readActiveState();
 			if (state != null && state.modpackId.equals(modpackId)) {
 				JournalEntry active = mirrorEntry(modpackId, state.contentToken);
+				kept.optional(active.policySha1(), -1, "installed policy document");
 				retainGenerationContent(active, kept);
 				keptTokens.add(active.contentToken());
 			}
