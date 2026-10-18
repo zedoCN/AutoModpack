@@ -1,6 +1,8 @@
 name: TECH repair build
 on:
   workflow_dispatch:
+  push:
+    branches: [codex/fix-installed-generation-journal]
 permissions:
   contents: read
 jobs:
