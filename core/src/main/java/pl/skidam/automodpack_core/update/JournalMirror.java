@@ -17,6 +17,7 @@ import pl.skidam.automodpack_core.modpack.ModpackId;
 import pl.skidam.automodpack_core.modpack.generation.Journal;
 import pl.skidam.automodpack_core.modpack.generation.JournalEntry;
 import pl.skidam.automodpack_core.utils.DurableFiles;
+import pl.skidam.automodpack_core.utils.FileTrees;
 
 /**
  * The client's per-pack replica of the server journal file. The mirror is only ever replaced whole
@@ -60,6 +61,23 @@ public final class JournalMirror {
 		}
 	}
 
+	/** The installed generation must remain reconstructible even when a server replaces its lineage. */
+	List<JournalEntry> entriesForGeneration(String modpackId, String contentToken) throws IOException {
+		List<JournalEntry> current = entries(modpackId);
+		if (current.stream().anyMatch(entry -> entry.contentToken().equals(contentToken))) return current;
+		var active = storage.readActiveState();
+		if (active == null || !modpackId.equals(active.modpackId) || !contentToken.equals(active.contentToken)) return current;
+		Path installed = installedJournalFile(modpackId);
+		if (!Files.exists(installed, LinkOption.NOFOLLOW_LINKS)) return current;
+		FileTrees.requireNoSymbolicLink(installed, "installed generation journal");
+		if (!Files.isRegularFile(installed, LinkOption.NOFOLLOW_LINKS)) throw new IOException("Installed generation journal is not a regular file: " + installed);
+		return Journal.openComplete(installed).entries();
+	}
+
+	private Path installedJournalFile(String modpackId) {
+		return storage.historyPackDirectory(modpackId).resolve("installed-journal.jsonl");
+	}
+
 	/** The content token of the mirror's last entry, or empty when the mirror is missing or empty. */
 	public Optional<String> lastEntryToken(String modpackId) throws IOException {
 		List<JournalEntry> entries = entries(modpackId);
@@ -94,6 +112,13 @@ public final class JournalMirror {
 		if (Journal.openComplete(fetchedFile).length() != verifiedEntries) throw new IOException("Fetched journal changed while it was swapped into the mirror");
 		Path mirror = storage.historyJournalFile(modpackId);
 		Files.createDirectories(mirror.getParent());
+		var active = storage.readActiveState();
+		if (active != null && modpackId.equals(active.modpackId)
+				&& entries(modpackId).stream().anyMatch(entry -> entry.contentToken().equals(active.contentToken))) {
+			Path installed = installedJournalFile(modpackId);
+			FileTrees.requireNoSymbolicLink(installed, "installed generation journal");
+			DurableFiles.writeAtomic(installed, Files.readAllBytes(mirror));
+		}
 		DurableFiles.replace(fetchedFile, mirror);
 	}
 }

@@ -48,6 +48,26 @@ class ClientGenerationStoreTest {
 	Path temporaryDirectory;
 
 	@Test
+	void preservesInstalledGenerationAcrossReplacementLineagesAndRepeatedFetches() throws Exception {
+		ClientStorage storage = storage();
+		String hash = store(storage, "installed-object");
+		PackDocument installed = document(FIRST_PACK, hash, Files.size(storage.objectFile(hash)), TestPacks.CREATED);
+		TestPacks.stageGeneration(storage, installed);
+		storage.writeActiveState(FIRST_PACK, installed.contentToken(), installed.ownershipLedger().toFields());
+		JournalMirror mirror = new JournalMirror(storage);
+		String replacementToken = HashUtils.sha1("replacement".getBytes(StandardCharsets.UTF_8));
+		for (int attempt = 0; attempt < 2; attempt++) {
+			Path fetched = Files.createTempFile(temporaryDirectory, "replacement-", ".jsonl");
+			Journal.open(fetched).append(new JournalEntry(1, replacementToken, hash, TestPacks.CREATED, "", JournalEntry.NO_RESTORE, List.of()));
+			mirror.replaceFrom(FIRST_PACK, fetched);
+			assertEquals(replacementToken, mirror.lastEntryToken(FIRST_PACK).orElseThrow());
+			assertEquals(installed, new ClientGenerationStore(storage).readActiveTarget(ClientPlatform.LINUX).orElseThrow().document());
+		}
+		Files.delete(storage.objectFile(installed.policySha1()));
+		assertThrows(IOException.class, () -> new ClientGenerationStore(storage).readActiveTarget(ClientPlatform.LINUX));
+	}
+
+	@Test
 	void reconstructsTheActiveTargetFromMirrorCasAndActiveState() throws Exception {
 		ClientStorage storage = storage();
 		String hash = store(storage, "projection-object");

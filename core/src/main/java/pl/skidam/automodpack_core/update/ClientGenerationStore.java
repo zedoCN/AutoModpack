@@ -480,7 +480,7 @@ public final class ClientGenerationStore {
 		String normalizedToken = HashUtils.normalizeSha1(contentToken);
 		JournalEntry newest = null;
 		JournalEntry newestWitnessed = null;
-		for (JournalEntry entry : new JournalMirror(storage).entries(normalizedModpackId)) {
+		for (JournalEntry entry : new JournalMirror(storage).entriesForGeneration(normalizedModpackId, normalizedToken)) {
 			if (!entry.contentToken().equals(normalizedToken)) continue;
 			newest = entry;
 			if (Files.exists(storage.objectFile(ClientObjectStore.normalizeHash(entry.policySha1())), LinkOption.NOFOLLOW_LINKS)) newestWitnessed = entry;

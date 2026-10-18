@@ -1,0 +1,25 @@
+name: TECH repair build
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: |
+            17
+            25
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Validate and package TECH client
+        run: ./gradlew :core:test oneJar spotlessJavaCheck checkNoFullyQualifiedNames -Pautomodpack.targets=26.2-neoforge --no-daemon
+      - uses: actions/upload-artifact@v7
+        with:
+          name: automodpack-tech-client
+          path: merged/*.jar
+          if-no-files-found: error
